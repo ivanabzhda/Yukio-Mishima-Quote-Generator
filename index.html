@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Генератор цитат Юкио Мисимы</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 16px;
+    text-align: center;
+  }
+  h1 { font-size: 1.5rem; }
+  textarea {
+    display: block;
+    width: 100%;
+    font-size: 16px; /* меньше 16px iOS увеличивает страницу при фокусе */
+    font-family: inherit;
+  }
+  select, button { font-size: 16px; padding: 8px 14px; }
+  .buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  canvas { display: none; max-width: 100%; height: auto; margin: 0 auto; }
+
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    h1 { font-size: 1.25rem; }
+    .buttons button { flex: 1 1 100%; }
+  }
+  @media (min-width: 900px) {
+    body { max-width: 760px; padding-top: 32px; }
+  }
+</style>
+</head>
+<body>
+
+<p>
+  <select id="lang" aria-label="Language">
+    <option value="ru">RU</option>
+    <option value="en">EN</option>
+  </select>
+</p>
+
+<h1 id="header"></h1>
+
+<p><label for="quote" id="inputLabel"></label></p>
+<p><textarea id="quote" rows="7"></textarea></p>
+<p id="count"></p>
+
+<div class="buttons">
+  <button type="button" id="btnGenerate"></button>
+  <button type="button" id="btnDownload" disabled></button>
+  <button type="button" id="btnCopy" disabled></button>
+</div>
+
+<p id="status" role="status"></p>
+
+<canvas id="canvas"></canvas>
+
+<script>
+// ================= SETTINGS =================
+const BOX_LEFT = 120, BOX_TOP = 780, BOX_RIGHT = 977, BOX_BOTTOM = 1020;
+const BOX_W = BOX_RIGHT - BOX_LEFT;
+const BOX_H = BOX_BOTTOM - BOX_TOP;
+const MAX_CHARS = 240;
+const MAX_CHARS_EMOJI = 200;
+const FONT_SIZES = [60, 50, 40, 35, 30, 25, 20];
+const LINE_GAP = 10;
+const FONT_FAMILY = 'Arial, "Helvetica Neue", Roboto, sans-serif';
+const TEMPLATE_URL = "template.jpg";
+
+// ================= TRANSLATIONS =================
+const TEXTS = {
+  ru: {
+    title: "Генератор цитат Юкио Мисимы",
+    header: "Генератор цитат Юкио Мисимы",
+    input_label: "Введите текст цитаты:",
+    placeholder: "Если на вашей могиле не написано «Покойся с миром», вы автоматически призываетесь в войну скелетов.",
+    btn_generate: "Создать цитату",
+    btn_download: "Скачать",
+    btn_copy: "Копировать",
+    status_ready: "Готово к работе",
+    status_no_text: "Ошибка: введите текст",
+    status_limit: "Ошибка: макс. {n} символов",
+    status_no_template: "Ошибка: template.jpg не найден",
+    status_done: "Цитата создана",
+    status_err: "Ошибка: {err}",
+    status_export_err: "Картинка создана, но скачать и скопировать её нельзя: откройте страницу по адресу http(s), а не как файл (file://)",
+    status_saved: "Сохранено: {name}",
+    status_nothing: "Сначала создайте цитату",
+    status_copied: "Картинка скопирована в буфер",
+    status_copy_err: "Не удалось скопировать: {err}",
+    emoji_mark: " (эмодзи)",
+  },
+  en: {
+    title: "Yukio Mishima Quote Generator",
+    header: "Yukio Mishima Quote Generator",
+    input_label: "Enter quote text:",
+    placeholder: "If your grave doesn't say «Rest in Peace» on it, you are automatically drafted into the skeleton war.",
+    btn_generate: "Create quote",
+    btn_download: "Download",
+    btn_copy: "Copy",
+    status_ready: "Ready",
+    status_no_text: "Error: enter text",
+    status_limit: "Error: max {n} characters",
+    status_no_template: "Error: template.jpg not found",
+    status_done: "Quote created",
+    status_err: "Error: {err}",
+    status_export_err: "Image created, but it cannot be downloaded or copied: open the page via http(s), not as a file (file://)",
+    status_saved: "Saved: {name}",
+    status_nothing: "Create a quote first",
+    status_copied: "Image copied to clipboard",
+    status_copy_err: "Could not copy: {err}",
+    emoji_mark: " (emoji)",
+  },
+};
+
+// ================= STATE =================
+const $ = (id) => document.getElementById(id);
+const textarea = $("quote");
+const canvas = $("canvas");
+const ctx = canvas.getContext("2d");
+let lang = safeGet("lang");
+if (!TEXTS[lang]) lang = "ru";
+let lastBlob = null;
+let templateImg = null;
+
+function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function safeSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+
+const t = (key, vars = {}) =>
+  (TEXTS[lang][key] ?? key).replace(/\{(\w+)\}/g, (_, k) => vars[k]);
+
+function setStatus(text) { $("status").textContent = text; }
+
+// ================= LANGUAGE =================
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.title = t("title");
+  $("lang").value = lang;
+  $("header").textContent = t("header");
+  $("inputLabel").textContent = t("input_label");
+  textarea.placeholder = t("placeholder");
+  $("btnGenerate").textContent = t("btn_generate");
+  $("btnDownload").textContent = t("btn_download");
+  $("btnCopy").textContent = t("btn_copy");
+  setStatus(t("status_ready"));
+  updateCounter();
+}
+
+$("lang").addEventListener("change", (e) => {
+  lang = e.target.value;
+  safeSet("lang", lang);
+  applyLang();
+});
+
+// ================= COUNTER =================
+const codePoints = (s) => Array.from(s);
+const hasEmoji = (s) => codePoints(s).some((c) => c.codePointAt(0) > 0xFFFF);
+const normalize = (s) => s.split(/\s+/).filter(Boolean).join(" ");
+
+function updateCounter() {
+  const chars = codePoints(textarea.value);
+  const emoji = hasEmoji(textarea.value);
+  const limit = emoji ? MAX_CHARS_EMOJI : MAX_CHARS;
+
+  if (chars.length > limit) {
+    textarea.value = chars.slice(0, limit).join("");
+  }
+  const len = Math.min(chars.length, limit);
+  $("count").textContent = `${len} / ${limit}${emoji ? t("emoji_mark") : ""}`;
+}
+textarea.addEventListener("input", updateCounter);
+
+// ================= WRAP AND FIT =================
+function wrapText(text, maxWidth) {
+  const width = (s) => ctx.measureText(s).width;
+  const lines = [];
+  let current = "";
+
+  for (const word of text.split(" ")) {
+    const test = current ? current + " " + word : word;
+    if (width(test) <= maxWidth) {
+      current = test;
+      continue;
+    }
+    if (current) lines.push(current);
+
+    if (width(word) > maxWidth) {
+      let temp = "";
+      for (const ch of word) {
+        if (width(temp + ch) <= maxWidth) temp += ch;
+        else { if (temp) lines.push(temp); temp = ch; }
+      }
+      current = temp;
+    } else {
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function layout(text, size) {
+  ctx.font = `bold ${size}px ${FONT_FAMILY}`;
+  const lines = wrapText(text, BOX_W);
+  const lineH = size * 1.15 + LINE_GAP;
+  const totalH = lines.length * lineH - LINE_GAP;
+  return { size, lines, lineH, totalH };
+}
+
+function autoFit(text) {
+  for (const size of FONT_SIZES) {
+    const result = layout(text, size);
+    if (result.totalH <= BOX_H) return result;
+  }
+  return layout(text, FONT_SIZES[FONT_SIZES.length - 1]);
+}
+
+// ================= TEMPLATE =================
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function getTemplate() {
+  if (!templateImg) templateImg = await loadImage(TEMPLATE_URL);
+  return templateImg;
+}
+
+// ================= GENERATE =================
+async function generate() {
+  const userText = normalize(textarea.value);
+  if (!userText) return setStatus(t("status_no_text"));
+
+  const limit = hasEmoji(userText) ? MAX_CHARS_EMOJI : MAX_CHARS;
+  if (codePoints(userText).length > limit) return setStatus(t("status_limit", { n: limit }));
+
+  let img;
+  try { img = await getTemplate(); }
+  catch { return setStatus(t("status_no_template")); }
+
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  ctx.drawImage(img, 0, 0);
+
+  const { size, lines, lineH, totalH } = autoFit(userText);
+  ctx.font = `bold ${size}px ${FONT_FAMILY}`;
+  ctx.fillStyle = "black";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const cx = BOX_LEFT + BOX_W / 2;
+  const top = BOX_TOP + BOX_H / 2 - totalH / 2;
+  lines.forEach((line, i) => ctx.fillText(line, cx, top + i * lineH + (size * 1.15) / 2));
+
+  canvas.style.display = "block";
+
+  try {
+    lastBlob = await new Promise((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob"))), "image/png"));
+  } catch (e) {
+    lastBlob = null;
+    $("btnDownload").disabled = true;
+    $("btnCopy").disabled = true;
+    return setStatus(t("status_export_err"));
+  }
+
+  $("btnDownload").disabled = false;
+  $("btnCopy").disabled = false;
+  setStatus(t("status_done"));
+}
+
+async function generateSafe() {
+  try {
+    await generate();
+  } catch (e) {
+    setStatus(t("status_err", { err: e.message }));
+  }
+}
+
+// ================= DOWNLOAD / COPY =================
+function nextFilename() {
+  const n = (parseInt(safeGet("counter"), 10) || 0) + 1;
+  safeSet("counter", String(n));
+  return `result_quote_${n}.png`;
+}
+
+function download() {
+  if (!lastBlob) return setStatus(t("status_nothing"));
+  const name = nextFilename();
+  const url = URL.createObjectURL(lastBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus(t("status_saved", { name }));
+}
+
+async function copyImage() {
+  if (!lastBlob) return setStatus(t("status_nothing"));
+  try {
+    if (!navigator.clipboard || !window.ClipboardItem) throw new Error("not supported");
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": lastBlob })]);
+    setStatus(t("status_copied"));
+  } catch (e) {
+    setStatus(t("status_copy_err", { err: e.message }));
+  }
+}
+
+$("btnGenerate").addEventListener("click", generateSafe);
+$("btnDownload").addEventListener("click", download);
+$("btnCopy").addEventListener("click", copyImage);
+
+applyLang();
+</script>
+</body>
+</html>
